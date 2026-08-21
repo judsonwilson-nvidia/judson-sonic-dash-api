@@ -1,0 +1,158 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@sonic_build_infra//swig:defs.bzl", "swig_gen", "swig_lib_deb")
+load(":force_pic_transition.bzl", "force_pic_cc_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+# `utils.{h,cpp}` implement TableNameToTypeUrl/PbBinaryToJsonString/JsonStringToPbBinary
+# purely through protobuf's generic reflection APIs (DescriptorPool::generated_pool(),
+# util::TypeResolver) — it never #includes a generated *.pb.h. That means nothing here
+# directly references a symbol from //proto:dash_api_cc_proto; the *.pb.cc translation
+# units only matter for their static-initializer side effect of registering each
+# message's descriptor into the process-wide generated pool. A plain `deps` link can
+# drop them (PbBinaryToJsonString would fail at runtime with "Invalid type URL, unknown
+# type: ..."); both cc_binary targets below force this in with `-Wl,--whole-archive`.
+cc_library(
+    name = "utils_impl",
+    srcs = ["utils.cpp"],
+    hdrs = ["utils.h"],
+    # SWIG's generated utils_wrap.cpp (built one directory down, in
+    # pypkg/dash_api/) does a bare `#include "utils.h"` (copied verbatim from
+    # utils.i's %{ ... %} block). "includes" adds this package itself as a
+    # quote-include root so that resolves for any dependent target.
+    includes = ["."],
+    deps = [
+        "//proto:dash_api_cc_proto",
+        "@com_google_protobuf//:protobuf",
+    ],
+)
+
+# The legacy Makefile's `dashapi.so`: a plain C/C++ shared library (no Python)
+# other components can link against via utils.h's extern "C" functions.
+#
+# Deliberately a plain cc_binary(linkshared = True) rather than
+# cc_shared_library: cc_shared_library links against the protobuf runtime as
+# a dynamic_dep, which requires that runtime to have been built with -fPIC;
+# this repo's bzlmod `protobuf` module is not guaranteed to be. --whole-archive
+# forces in //proto:dash_api_cc_proto's *.pb.cc objects (see utils_impl's
+# comment above for why that's needed). force_pic_cc_binary (rather than a
+# plain cc_binary) is needed on top of that - see force_pic_transition.bzl.
+cc_binary(
+    name = "libdashapi_so_raw",
+    data = [
+        "//proto:dash_api_cc_proto_archive",
+        "//proto:timestamp_cc_proto_archive",
+    ],
+    linkopts = [
+        "-Wl,--whole-archive",
+        "$(location //proto:dash_api_cc_proto_archive)",
+        "$(location //proto:timestamp_cc_proto_archive)",
+        "-Wl,--no-whole-archive",
+    ],
+    linkshared = True,
+    linkstatic = True,
+    # Only links under the --force_pic transition applied by the wrapper
+    # below; "manual" keeps wildcard patterns from trying it directly.
+    tags = ["manual"],
+    deps = [":utils_impl"],
+)
+
+force_pic_cc_binary(
+    name = "libdashapi.so",
+    binary = ":libdashapi_so_raw",
+)
+
+# Extract the installed SWIG runtime files (swig.swg etc.) from the apt package,
+# same as sonic-swss-common/pyext does, for a hermetic (non-network) SWIG run.
+swig_lib_deb(
+    name = "swig_lib",
+    data = "@trixie//swig",
+    strip_prefix = "usr/share/swig/4.3.0",
+)
+
+exports_files([
+    "utils.i",
+    "dash_api_utils",
+    "pypkg/dash_api/__init__.py",
+])
+
+swig_gen(
+    name = "utils_swig",
+    hdrs = ["utils.h"],
+    interface = "utils.i",
+    cpp_out = "pypkg/dash_api/utils_wrap.cpp",
+    python_out = "pypkg/dash_api/utils.py",
+    swig_lib = ":swig_lib",
+)
+
+# swig_gen's DefaultInfo bundles both the generated .cpp (consumed by
+# :utils_wrap below) and the .py wrapper; runtime packaging (top-level
+# BUILD.bazel) only wants the latter.
+filegroup(
+    name = "utils_swig_py",
+    srcs = [":utils_swig"],
+    output_group = "python",
+)
+
+cc_library(
+    name = "utils_wrap",
+    srcs = ["pypkg/dash_api/utils_wrap.cpp"],
+    hdrs = ["utils.h"],
+    deps = [
+        ":utils_impl",
+        "@trixie//python3-dev:python3",
+    ],
+)
+
+# The Python C extension module dash_api._utils, imported by the SWIG-generated
+# dash_api/utils.py. Same linkshared-not-cc_shared_library and force_pic
+# reasoning as libdashapi.so above. PyInit__utils (the entry point Python's
+# loader looks up by name via dlsym, per PEP 489) is never referenced by any
+# other symbol in this binary, and this toolchain's default build flags
+# include -ffunction-sections + --gc-sections; without -u to force the
+# linker to treat it as needed, that combination silently discards the
+# function and the import fails with "does not define module export
+# function".
+cc_binary(
+    name = "_utils_so_raw",
+    data = [
+        "//proto:dash_api_cc_proto_archive",
+        "//proto:timestamp_cc_proto_archive",
+    ],
+    linkopts = [
+        "-Wl,-u,PyInit__utils",
+        "-Wl,--whole-archive",
+        "$(location //proto:dash_api_cc_proto_archive)",
+        "$(location //proto:timestamp_cc_proto_archive)",
+        "-Wl,--no-whole-archive",
+    ],
+    linkshared = True,
+    linkstatic = True,
+    # See libdashapi_so_raw above.
+    tags = ["manual"],
+    deps = [
+        ":utils_wrap",
+        "@trixie//python3-dev:python3",
+    ],
+)
+
+force_pic_cc_binary(
+    name = "_utils.so",
+    binary = ":_utils_so_raw",
+)
+
+# In-Bazel-graph dependency for consumers that want to import the SWIG
+# bindings directly (e.g. misc/tests/bazel_python_utils_test.py), as
+# opposed to runtime_pkg's plain packaging tars which only exist for
+# assembling a container image.
+py_library(
+    name = "utils_py",
+    srcs = [":utils_swig_py"],
+    data = [":_utils.so"],
+    imports = [
+        ".",
+        "pypkg/dash_api",
+    ],
+)

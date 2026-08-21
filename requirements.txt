@@ -1,0 +1,6 @@
+# Pins the Python protobuf runtime this module's generated *_pb2.py files
+# (built against protobuf 33.4, see MODULE.bazel's bazel_dep) require.
+# Trixie's apt python3-protobuf package (5.29.6) is too old: protobuf's
+# Python runtime hard-fails to load gencode newer than itself. See
+# BUILD.bazel's pb_runtime_pkg target for where this is consumed.
+protobuf==6.33.4

@@ -1,0 +1,48 @@
+# Keep bazel_compatibility in sync with sonic-buildimage's .bazelversion.
+module(
+    name = "sonic-dash-api",
+    version = "0.0.0",
+    bazel_compatibility = [
+        ">=8.5.1",
+        "<=8.5.1",
+    ],
+)
+
+bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.3", dev_dependency = True)
+bazel_dep(name = "googletest", version = "1.17.0", repo_name = "com_google_googletest")
+
+# Same versions sonic-sysmgr already pins for its own protos, so the two
+# modules resolve to one shared copy of each in the overall build graph.
+bazel_dep(name = "protobuf", version = "33.4", repo_name = "com_google_protobuf")
+bazel_dep(name = "rules_proto", version = "7.1.0")
+bazel_dep(name = "rules_cc", version = "0.2.14")
+bazel_dep(name = "rules_python", version = "1.7.0")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "bazel_lib", version = "3.1.1")
+bazel_dep(name = "tar.bzl", version = "0.10.5")
+bazel_dep(name = "rules_distroless", version = "0.0.0.commit-01bb79d7eef4eb3ce9511d3dfaf0ab386bd8d12d")
+bazel_dep(name = "sonic-build-infra", version = "0.0.0", repo_name = "sonic_build_infra")
+
+register_toolchains("@sonic_build_infra//toolchains/gcc:all")
+
+# The package catalog (including swig, libboost-dev, python3-dev) is
+# maintained centrally by sonic-build-infra; re-export it rather than
+# standing up a second, private apt registry.
+apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
+use_repo(apt, "trixie")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(python_version = "3.11")
+use_repo(python, "python_3_11")
+
+# Pins a Python protobuf runtime matching the protobuf bazel_dep's version
+# (33.4), since Trixie's apt python3-protobuf package (5.29.6) is too old
+# for this module's generated *_pb2.py files - see requirements.txt and
+# BUILD.bazel's pb_runtime_pkg target.
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "dash_api_pip",
+    python_version = "3.11",
+    requirements_lock = "//:requirements.txt",
+)
+use_repo(pip, "dash_api_pip")

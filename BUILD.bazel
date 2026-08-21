@@ -1,0 +1,139 @@
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@tar.bzl", "mutate", "tar")
+
+package(default_visibility = ["//visibility:public"])
+
+# Runtime layer 1: the generated dash_api/*_pb2.py files. proto/BUILD.bazel's
+# py_proto_library places these under a "_virtual_imports/dash_api_proto/"
+# staging directory (an artifact of //proto:dash_api_proto's
+# strip_import_prefix); flatten that away and relocate under the dash_api
+# python package's install path, matching where the legacy Makefile's
+# `protoc --python_out=$(PYPKG_DIR)` writes them.
+tar(
+    name = "pb2_pkg",
+    srcs = ["//proto:dash_api_py_proto"],
+    mutate = mutate(
+        strip_prefix = "proto/_virtual_imports/dash_api_proto",
+        package_dir = "usr/lib/python3/dist-packages/dash_api",
+    ),
+)
+
+# Runtime layer 2: the checked-in __init__.py and the SWIG-generated
+# utils.py - these already live under misc/pypkg/dash_api/, so stripping
+# "misc/pypkg" lands them directly in the same dash_api package directory as
+# layer 1.
+tar(
+    name = "swig_pkg",
+    srcs = [
+        "//misc:pypkg/dash_api/__init__.py",
+        "//misc:utils_swig_py",
+    ],
+    mutate = mutate(
+        strip_prefix = "misc/pypkg",
+        package_dir = "usr/lib/python3/dist-packages",
+    ),
+)
+
+# Runtime layer 3: the compiled dash_api._utils Python C extension. Lives
+# directly under misc/ (not misc/pypkg/), so it needs its own strip_prefix
+# rather than sharing layer 2's.
+tar(
+    name = "so_pkg",
+    srcs = ["//misc:_utils.so"],
+    mutate = mutate(
+        strip_prefix = "misc",
+        package_dir = "usr/lib/python3/dist-packages/dash_api",
+    ),
+)
+
+# Runtime layer 4: the standalone C/C++ shared library (utils.h's extern "C"
+# API), matching the legacy Makefile's `install` target copy to
+# $(INSTALLED_LIB_DIR). Multiarch-triple directory, same convention
+# sonic-swss-common's libswsscommon_pkg uses.
+[
+    tar(
+        name = "lib_pkg_" + cpu,
+        srcs = ["//misc:libdashapi.so"],
+        mutate = mutate(
+            strip_prefix = "misc",
+            package_dir = "usr/lib/" + multiarch,
+        ),
+        target_compatible_with = ["@platforms//cpu:" + cpu],
+    )
+    for cpu, multiarch in [
+        ("x86_64", "x86_64-linux-gnu"),
+        ("arm64", "aarch64-linux-gnu"),
+    ]
+]
+
+alias(
+    name = "lib_pkg",
+    actual = select({
+        "@platforms//cpu:x86_64": ":lib_pkg_x86_64",
+        "@platforms//cpu:arm64": ":lib_pkg_arm64",
+    }),
+)
+
+# Runtime layer 5: the dash_api_utils CLI script. This is a plain Python
+# script (shebang + click), not a compiled binary - despite package
+# directory naming conventions elsewhere suggesting otherwise, this repo's
+# misc/dash_api_utils has always been source Python, never a compiled tool.
+tar(
+    name = "bin_pkg",
+    srcs = ["//misc:dash_api_utils"],
+    mutate = mutate(
+        strip_prefix = "misc",
+        package_dir = "usr/bin",
+    ),
+)
+
+# Runtime layer 6: the pure-Python google.protobuf runtime this module's
+# proto/BUILD.bazel-generated *_pb2.py files were compiled against (protobuf
+# 33.4, per this module's MODULE.bazel bazel_dep). Trixie's apt
+# python3-protobuf package is 5.29.6 - protobuf's Python runtime hard-fails
+# ("Detected incompatible Protobuf Gencode/Runtime versions") if the runtime
+# is older than the gencode it's asked to load, so consuming that apt
+# package for these particular generated modules doesn't work (confirmed:
+# `from dash_api import route_pb2; route_pb2.Route()` raises VersionError
+# against it). Bundle the exact version the gencode was built against
+# instead, so the two can never drift apart.
+tar(
+    name = "pb_runtime_pkg",
+    srcs = ["@dash_api_pip//protobuf"],
+    mutate = mutate(
+        strip_prefix = "site-packages",
+        package_dir = "usr/lib/python3/dist-packages",
+    ),
+)
+
+# All layers together, for consumers (docker-database) that just want "the
+# whole libdashapi runtime" as a single dependency.
+#
+# Headers (/usr/include/dash_api/*.h) are intentionally not packaged here,
+# unlike a full "-dev" style package: the only consumer in this repo
+# (docker-database) needs the runtime files, not a C++ build-time
+# dependency, and aspeed (the only Bazel-built platform today) has no
+# swss/orchagent/syncd in scope that would link against them.
+filegroup(
+    name = "runtime_pkg",
+    srcs = [
+        ":bin_pkg",
+        ":lib_pkg",
+        ":pb2_pkg",
+        ":pb_runtime_pkg",
+        ":so_pkg",
+        ":swig_pkg",
+    ],
+)
+
+# Regression test for runtime_pkg's layout: asserts each of the five layers'
+# files land at the install path consumers (docker-database) expect, so a
+# strip_prefix/package_dir typo in any layer above fails `bazel test`
+# instead of only surfacing as a runtime import/link failure inside a built
+# container.
+py_test(
+    name = "runtime_pkg_test",
+    srcs = ["runtime_pkg_test.py"],
+    data = [":runtime_pkg"],
+    main = "runtime_pkg_test.py",
+)

@@ -1,6 +1,8 @@
 .vscode/*
 proto/*
 !proto/*.proto
+!proto/*.bzl
+!proto/BUILD.bazel
 **/build/*
 
 debian/.debhelper/*
@@ -8,3 +10,7 @@ debian/debhelper-build-stamp
 debian/files
 debian/libdashapi.substvars
 debian/libdashapi
+
+# Bazel
+bazel-*
+MODULE.bazel.lock

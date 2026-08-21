@@ -1,0 +1,51 @@
+load("@com_google_protobuf//bazel:py_proto_library.bzl", "py_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load(":filter_archive.bzl", "filter_archive")
+
+package(default_visibility = ["//visibility:public"])
+
+# Mirrors the legacy Makefile's `protoc -I=proto --cpp_out=... proto/*.proto`:
+# all .proto files are compiled together as one unit (they cross-import each
+# other freely, e.g. most import types.proto), plus the one well-known type
+# (google/protobuf/timestamp.proto) that ha_scope_state.proto/ha_set_state.proto
+# pull in.
+proto_library(
+    name = "dash_api_proto",
+    srcs = glob(["*.proto"]),
+    # The .proto files import each other by bare filename (e.g. `import
+    # "types.proto"`, not `import "proto/types.proto"`), matching how the
+    # legacy Makefile invokes `protoc -I=proto ...`. Strip this package's own
+    # path prefix so protoc resolves those imports the same way.
+    strip_import_prefix = "",
+    deps = ["@com_google_protobuf//:timestamp_proto"],
+)
+
+cc_proto_library(
+    name = "dash_api_cc_proto",
+    deps = [":dash_api_proto"],
+)
+
+# Produces the dash_api/*_pb2.py + *_pb2.pyi files the legacy Makefile
+# generates via `protoc --python_out=... --pyi_out=...`.
+py_proto_library(
+    name = "dash_api_py_proto",
+    deps = [":dash_api_proto"],
+)
+
+# cc_proto_library's DefaultInfo bundles the generated *.pb.h/*.pb.cc AND the
+# compiled libdash_api_proto.a together, so plain $(location) on
+# :dash_api_cc_proto is ambiguous. Consumers that need to force-link the
+# whole archive (see misc/BUILD.bazel's comment on utils_impl for why) use
+# this instead.
+filter_archive(
+    name = "dash_api_cc_proto_archive",
+    target = ":dash_api_cc_proto",
+)
+
+# ha_scope_state.proto/ha_set_state.proto import google/protobuf/timestamp.proto;
+# their generated *.pb.cc reference its descriptor table at static-init time,
+# so this needs the same whole-archive treatment as our own proto archive.
+filter_archive(
+    name = "timestamp_cc_proto_archive",
+    target = "@com_google_protobuf//:timestamp_cc_proto",
+)
