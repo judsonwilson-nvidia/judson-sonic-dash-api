@@ -67,14 +67,29 @@ uninstall:
 	$(RM) $(INSTALLED_LIB_DIR)/$(LIBDASHAPI)
 	$(RM) $(INSTALLED_PYTHON_DIR)
 
+# The Bazel build added test files that this Make build must not pick up. Before those
+# commits `python3 -m pytest` collected exactly one file, misc/tests/test_utils.py; the
+# scoping below restores that while still discovering any future test added under
+# misc/tests/. Run the Bazel ones with `bazel test //...`.
+#
+# Two distinct problems, hence two mechanisms:
+#   * misc/tests/bazel_* -- bazel_python_utils_test.py imports the SWIG extension the way
+#     Bazel stages it and fails collection under plain pytest with "ModuleNotFoundError:
+#     No module named 'utils'"; bazel_utils_unittest.cpp would be swept into the gtest
+#     binary by the wildcard below. Excluded by prefix.
+#   * runtime_pkg_test.py -- lives at the repo ROOT and asserts the layout of the packaged
+#     Bazel runtime, so it cannot pass outside Bazel and no bazel_ prefix would catch it.
+#     Excluded by pointing pytest at $(TEST_DIR) instead of the whole tree.
+MAKE_TEST_SRCS := $(filter-out $(TEST_DIR)/bazel_%,$(wildcard $(TEST_DIR)/*.cpp))
+
 test: swig dashapi.so
 	g++ -std=c++14 \
 		-D PROTO_PATH=\"$(DASH_API_PROTO_DIR)\" \
 		-I $(BUILD_DIR) -I $(MISC_DIR) \
-		$(wildcard $(TEST_DIR)/*.cpp) \
+		$(MAKE_TEST_SRCS) \
 		-L$(BUILD_DIR) -l$(LIBNAME) -lprotobuf -lgtest -lpthread -lboost_system -lboost_filesystem \
 		-o $(TEST_DIR)/test
 	LD_LIBRARY_PATH=$(BUILD_DIR) $(TEST_DIR)/test
-	python3 -m pytest
+	python3 -m pytest $(TEST_DIR) --ignore-glob='*/bazel_*'
 
 .PHONY: uninstall clean
