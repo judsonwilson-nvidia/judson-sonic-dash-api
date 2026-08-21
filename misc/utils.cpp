@@ -10,6 +10,22 @@
 #include <google/protobuf/util/json_util.h>
 #include <google/protobuf/util/type_resolver_util.h>
 
+// PROTOBUF_VERSION, used by the guards below, lives in runtime_version.h -- but that header
+// only exists from protobuf 27 onwards, so including it unconditionally makes this file
+// impossible to compile with exactly the older protobufs the guards are there to support.
+// The Bazel build fetches protobuf 33.4 and has it; the Make/dpkg build compiles against
+// Debian trixie's libprotobuf-dev 3.21.12, which does not, and failed with
+// "fatal error: google/protobuf/runtime_version.h: No such file or directory".
+//
+// Include it only when it is there. On older protobuf PROTOBUF_VERSION then stays undefined,
+// the preprocessor evaluates it as 0 in the #if below, and the pre-24 spelling is selected --
+// which is what those versions want anyway.
+#if defined(__has_include)
+#  if __has_include(<google/protobuf/runtime_version.h>)
+#    include <google/protobuf/runtime_version.h>
+#  endif
+#endif
+
 using namespace std;
 using namespace google::protobuf;
 
@@ -70,14 +86,21 @@ string PbBinaryToJsonString(const string &table_name, const string &binary) {
     auto url = TableNameToTypeUrl(table_name);
     util::JsonPrintOptions options;
     options.add_whitespace = true;
+    // Renamed in protobuf 24 (json_util.h's JsonPrintOptions moved to
+    // google/protobuf/json/json.h); keep both spellings so this compiles
+    // against whichever protobuf a given build system links against.
+#if PROTOBUF_VERSION >= 4024000
+    options.always_print_fields_with_no_presence = true;
+#else
     options.always_print_primitive_fields = true;
+#endif
     options.preserve_proto_field_names = true;
     string json;
 
     // Parse the message type
     auto status = util::BinaryToJsonString(resolver.get(), url, binary, &json, options);
     if (!status.ok()) {
-        throw runtime_error(status.message().as_string());
+        throw runtime_error(std::string(status.message()));
     }
 
     return json;
@@ -92,7 +115,7 @@ string JsonStringToPbBinary(const string &table_name, const string &json) {
     string binary;
     auto status = util::JsonToBinaryString(resolver.get(), url, json, &binary, options);
     if (!status.ok()) {
-        throw runtime_error(status.message().as_string());
+        throw runtime_error(std::string(status.message()));
     }
 
     return binary;
